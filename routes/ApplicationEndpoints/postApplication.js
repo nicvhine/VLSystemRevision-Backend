@@ -43,40 +43,6 @@ module.exports = (db) => {
     }
   );
   
-  // Re-loan application 
-  router.post(
-    "/reloan/:loanType",
-    upload.fields([
-      { name: "documents", maxCount: 6 },
-      { name: "profilePic", maxCount: 1 }
-    ]),
-    validate2x2,
-    async (req, res) => {
-      try {
-        const { loanType } = req.params;
-        const uploadedFiles = await processUploadedDocs(req.files);
-
-        // Force reloan flags
-        req.body.isReloan = true;
-
-        const application = await createReloanApplication(req, loanType, repo, db, uploadedFiles);
-
-        await logRepo.insertActivityLog({
-          action: "CREATE_LOAN_APPLICATION",
-          description: `New ${loanType} loan application submitted.`,
-        });
-
-        res.status(201).json({
-          message: "Re-loan application submitted successfully.",
-          application,
-        });
-      } catch (error) {
-        console.error("Error in /loan-applications/reloan/:loanType:", error);
-        res.status(400).json({ error: error.message || "Failed to submit re-loan application." });
-      }
-    }
-  );
-
 // Check for duplicate loan applications
 router.post("/check-duplicate", async (req, res) => {
   try {

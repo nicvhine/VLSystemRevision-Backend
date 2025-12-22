@@ -55,7 +55,6 @@ async function getApplicationById(repo, applicationId) {
 // --- Main loan creation function ---
 async function createLoanApplication(req, loanType, repo, db, uploadedFiles) {
   const {
-    isReloan,
     sourceOfIncome,
     appName, appDob, appContact, appEmail, appMarital, appChildren,
     appSpouseName, appSpouseOccupation, appAddress,
@@ -66,7 +65,6 @@ async function createLoanApplication(req, loanType, repo, db, uploadedFiles) {
     collateralType, collateralValue, collateralDescription, ownershipStatus
   } = req.body;
 
-  const isReloanBool = isReloan === "true" || isReloan === true;
 
   // --- Validate agent ---
   if (!appAgent) throw new Error("Agent must be selected for this application.");
@@ -135,11 +133,6 @@ async function createLoanApplication(req, loanType, repo, db, uploadedFiles) {
     throw new Error("Invalid source of income.");
   }
 
-  if (!isReloan) {
-    const existing = await repo.findPendingByApplicant(appName, appDob, appContact, appEmail);
-    if (existing) throw new Error("You already have a pending application with these details.");
-  }
-
   // --- Generate Application ID ---
   const applicationId = await generateApplicationId(repo.loanApplications);
   const principal = Number(appLoanAmount);
@@ -188,7 +181,6 @@ async function createLoanApplication(req, loanType, repo, db, uploadedFiles) {
         ? "Regular Loan With Collateral"
         : "Open-Term Loan",
     status: "Applied",
-    isReloan: isReloanBool,
     dateApplied: new Date(),
     profilePic: profilePic
       ? {
