@@ -9,86 +9,56 @@ const { BACKEND_URL } = require("../config");
 const borrowerRepository = require("../repositories/borrowerRepository");
 const borrowerSchema = require("../schemas/borrowerSchema");
 
-function generateTempPassword(length = 12) {
-  return crypto.randomBytes(length).toString("base64").slice(0, length);
-}
-
 // Create borrower
 async function createBorrower(data, db) {
   const repo = borrowerRepository(db);
-  const { name, role, applicationId, assignedCollector, assignedCollectorId } = data;
+  const { name, email, contactNumber, username, password } = data;
 
-  if (!name || !role || !applicationId)
-    throw new Error("Name, role, and applicationId are required");
+  if (!name || !email || !contactNumber || !username || !password)
+    throw new Error("Name, email, contact number, username, and password are required");
 
   if (!name.trim().includes(" "))
     throw new Error("Please provide full name (first and last)");
 
-  const application = await repo.findApplicationById(applicationId);
-  if (!application) throw new Error("Application not found");
+  // Normalize inputs
+  const normalizedEmail = email.trim().toLowerCase();
+  const normalizedPhone = contactNumber.trim();
+  const normalizedName = name.trim();
 
-  // Decrypt and normalize email & phone
-  let decryptedEmail = decrypt(application.appEmail);
-  let decryptedPhone = decrypt(application.appContact);
-  let decryptName = decrypt(name);
+  // Hash the password
+  const hashedPassword = await bcrypt.hash(password, 10);
 
-  if (!decryptedEmail || !decryptedPhone)
-    throw new Error("Application email or phone is missing");
-
-  // Generate unique username and borrower ID
-  const username = await generateBorrowerUsername(name, db.collection("borrowers_account"));
+  // Generate unique borrower ID
   const borrowersId = await generateBorrowerId(db.collection("borrowers_account"));
-  const tempPassword = generateTempPassword();
-  const hashedPassword = await bcrypt.hash(tempPassword, 10);
 
-  const profilePicUrl = application.profilePic
-    ? application.profilePic.filePath
-      ? application.profilePic.filePath.replace(/\\/g, "/")
-      : application.profilePic
-    : null;
-  
-  // Remove whitespace, normalize
-  const normalizedEmail = decryptedEmail.trim().toLowerCase();
-  const normalizedPhone = decryptedPhone.trim();
-  const normalizedName = decryptName.trim();
-
+  // Validate with schema
   borrowerSchema.parse({
     borrowersId,
     name: normalizedName,
-    role,
+    role: "borrower",
     username,
     password: hashedPassword,
-    isFirstLogin: true,
-    assignedCollector,
-    assignedCollectorId,
-    email: normalizedEmail, 
+    email: normalizedEmail,
     phoneNumber: normalizedPhone,
-    profilePic: profilePicUrl,
   });
 
-  // Build borrower object with encrypted fields
+  // Create borrower object
   const borrower = {
     borrowersId,
-    name: encrypt(name),
-    role,
+    name: encrypt(normalizedName),
+    role: "borrower",
     username,
     password: hashedPassword,
-    isFirstLogin: true,
-    assignedCollector,
-    assignedCollectorId,
     email: encrypt(normalizedEmail),
     phoneNumber: encrypt(normalizedPhone),
-    profilePic: profilePicUrl,
+    profilePic: null,
     createdDate: new Date(),
   };
 
-  // Save borrower to DB
+  // Insert into DB
   await repo.insertBorrower(borrower);
 
-  // Update application with borrower info
-  await repo.updateApplicationWithBorrower(applicationId, borrowersId, username);
-
-  return { borrower, tempPassword, email: normalizedEmail };
+  return { borrower, email: normalizedEmail };
 }
 
 // Login borrower
@@ -112,13 +82,12 @@ async function loginBorrower(username, password, db, jwtSecret) {
   return {
     message: "Login successful",
     name: decrypt(borrower.name),
-    username: decrypt(borrower.username),
+    username: borrower.username,
     phoneNumber: decrypt(borrower.phoneNumber),
     email: decrypt(borrower.email),
     role: "borrower",
     profilePic: borrower.profilePic || null,
     borrowersId: borrower.borrowersId,
-    isFirstLogin: borrower.isFirstLogin !== false,
     passwordChanged: borrower.passwordChanged === true,
     token,
   };
@@ -141,19 +110,88 @@ async function forgotPassword(username, email, db) {
   };
 }
 
-//Send Login OTP
+// Send OTP (for registration via SMS) - accepts contactNumber
+async function sendOtp(contactNumber, db) {
+  if (!contactNumber) throw new Error("Contact number is required");
+
+  const otp = Math.floor(100000 + Math.random() * 900000).toString();
+  
+  // Store OTP with contact number as key (for registration)
+  otpStore[contactNumber] = { otp, expires: Date.now() + 5 * 60 * 1000 };
+
+  // Format phone number for Semaphore API
+  const formattedPhone = contactNumber.startsWith("+") 
+    ? contactNumber 
+    : `+63${contactNumber.slice(1)}`; // Remove leading 0 and add +63
+
+  const message = `Your Vistula System verification code is ${otp}. It will expire in 5 minutes.`;
+
+  try {
+    const response = await fetch("https://api.semaphore.co/api/v4/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        apikey: process.env.SEMAPHORE_API_KEY,
+        number: formattedPhone,
+        message,
+      }),
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+      console.error("Semaphore error:", data);
+      throw new Error("Failed to send OTP via SMS");
+    }
+
+    console.log(`OTP sent via Semaphore to ${formattedPhone}: ${otp}`);
+    return { message: "OTP sent to your phone number", success: true };
+  } catch (err) {
+    console.error("Failed to send OTP:", err);
+    throw new Error("Failed to send OTP. Please try again.");
+  }
+}
+
+// Verify OTP (for registration)
+async function verifyOtp(contactNumber, otp) {
+  if (!contactNumber || !otp) throw new Error("Contact number and OTP are required");
+
+  const record = otpStore[contactNumber];
+  if (!record) throw new Error("No OTP found");
+  if (Date.now() > record.expires) {
+    delete otpStore[contactNumber];
+    throw new Error("OTP expired");
+  }
+  if (record.otp !== otp) throw new Error("Invalid OTP");
+
+  // Mark as verified but don't delete yet - will be deleted after registration
+  otpStore[contactNumber].verified = true;
+  return { message: "OTP verified successfully", success: true };
+}
+
+// Clear OTP after successful registration
+function clearOtp(contactNumber) {
+  if (otpStore[contactNumber]) {
+    delete otpStore[contactNumber];
+  }
+}
+
+// Send Login OTP (for existing users)
 async function sendLoginOtp(borrowersId, db) {
   if (!borrowersId) throw new Error("borrowersId is required");
 
-  const repo = require("../repositories/borrowerRepository")(db);
+  const repo = borrowerRepository(db);
   const borrower = await repo.findByBorrowersId(borrowersId);
   if (!borrower) throw new Error("Borrower not found");
 
   const otp = Math.floor(100000 + Math.random() * 900000).toString();
   otpStore[borrowersId] = { otp, expires: Date.now() + 5 * 60 * 1000 };
 
-  const phoneNumber = decrypt(borrower.phoneNumber); 
-  const formattedPhone = phoneNumber.startsWith("+") ? phoneNumber : `+63${phoneNumber.slice(-10)}`;
+  const phoneNumber = decrypt(borrower.phoneNumber);
+  const formattedPhone = phoneNumber.startsWith("+") 
+    ? phoneNumber 
+    : `+63${phoneNumber.slice(1)}`;
 
   const message = `Your Vistula System login OTP is ${otp}. It will expire in 5 minutes.`;
 
@@ -184,6 +222,7 @@ async function sendLoginOtp(borrowersId, db) {
   }
 }
 
+// Verify Login OTP
 async function verifyLoginOtp(borrowersId, otp) {
   if (!borrowersId || !otp) throw new Error("borrowersId and OTP are required");
 
@@ -197,38 +236,8 @@ async function verifyLoginOtp(borrowersId, otp) {
 
   if (record.otp !== otp) throw new Error("Invalid OTP");
 
-  // OTP is valid — remove it from store
   delete otpStore[borrowersId];
-
-  return { message: "OTP verified successfully" };
-}
-
-// Send OTP
-async function sendOtp(borrowersId, db) {
-  if (!borrowersId) throw new Error("borrowersId is required");
-
-  const repo = borrowerRepository(db);
-  const borrower = await repo.findByBorrowersId(borrowersId);
-  if (!borrower) throw new Error("Borrower not found");
-
-  const otp = Math.floor(100000 + Math.random() * 900000).toString();
-  otpStore[borrowersId] = { otp, expires: Date.now() + 5 * 60 * 1000 };
-
-  console.log(`OTP for ${borrower.email}: ${otp}`);
-  return { message: "OTP sent to your email address" };
-}
-
-// Verify OTP
-async function verifyOtp(borrowersId, otp) {
-  if (!borrowersId || !otp) throw new Error("borrowersId and otp are required");
-
-  const record = otpStore[borrowersId];
-  if (!record) throw new Error("No OTP found");
-  if (Date.now() > record.expires) throw new Error("OTP expired");
-  if (record.otp !== otp) throw new Error("Invalid OTP");
-
-  delete otpStore[borrowersId];
-  return { message: "OTP verified successfully" };
+  return { message: "OTP verified successfully", success: true };
 }
 
 // Get borrower by ID
@@ -245,17 +254,15 @@ async function getBorrowerById(borrowersId, db) {
 
   return {
     name: decrypt(borrower.name),
-    username: decrypt(borrower.username),
+    username: borrower.username,
     email: decrypt(borrower.email),
     role: "borrower",
     assignedCollector: borrower.assignedCollector,
-    isFirstLogin: borrower.isFirstLogin !== false,
     borrowersId: borrower.borrowersId,
     profilePic: profilePicUrl,
     status: activeLoan ? "Active" : "Inactive",
   };
 }
-
 
 // Find borrower account by username or email
 async function findBorrowerAccount(identifier, db) {
@@ -283,9 +290,10 @@ module.exports = {
   loginBorrower,
   forgotPassword,
   sendOtp,
+  verifyOtp,
   sendLoginOtp,
   verifyLoginOtp,
-  verifyOtp,
   getBorrowerById,
   findBorrowerAccount,
+  clearOtp,
 };

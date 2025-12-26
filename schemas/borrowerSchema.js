@@ -1,4 +1,4 @@
-const { z } = require('zod');
+const { z } = require("zod");
 
 const borrowerSchema = z.object({
   borrowersId: z.string(),
@@ -6,12 +6,9 @@ const borrowerSchema = z.object({
   role: z.string(),
   username: z.string(),
   password: z.string(),
-  isFirstLogin: z.boolean().default(true),
-  assignedCollector: z.string(),
-  assignedCollectorId: z.string().optional(),
   email: z.string().email(),
-  phoneNumber: z.string().optional(), 
-  profilePic: z.string().url().optional(),
+  phoneNumber: z.string(),
+  profilePic: z.string().optional(),
 });
 
 module.exports = borrowerSchema;

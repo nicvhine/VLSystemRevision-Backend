@@ -24,7 +24,10 @@ module.exports = (db) => {
         const { loanType } = req.params;
         const uploadedFiles = await processUploadedDocs(req.files);
   
-        const application = await createLoanApplication(req, loanType, repo, db, uploadedFiles);
+        // Read borrowersId from multipart form fields (if provided by the frontend)
+        const borrowersId = req.body?.borrowersId || null;
+        if (borrowersId) console.log(`Submitting application for borrowersId=${borrowersId}`);
+        const application = await createLoanApplication(req, loanType, repo, db, uploadedFiles, borrowersId);
   
          // Log the action
         await logRepo.insertActivityLog({

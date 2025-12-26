@@ -53,7 +53,7 @@ async function getApplicationById(repo, applicationId) {
 }
 
 // --- Main loan creation function ---
-async function createLoanApplication(req, loanType, repo, db, uploadedFiles) {
+async function createLoanApplication(req, loanType, repo, db, uploadedFiles, borrowersId = null) {
   const {
     sourceOfIncome,
     appName, appDob, appContact, appEmail, appMarital, appChildren,
@@ -149,6 +149,7 @@ async function createLoanApplication(req, loanType, repo, db, uploadedFiles) {
   // --- Build new application object ---
   let newApplication = {
     applicationId,
+    borrowersId: borrowersId || null, // Store borrowersId if provided
     appName: encrypt(appName),
     appDob,
     appContact: encrypt(appContact),

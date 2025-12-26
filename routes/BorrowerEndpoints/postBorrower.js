@@ -25,49 +25,6 @@ module.exports = (db) => {
   const logRepo = logRepository(db); 
   const notifRepo = notificationRepository(db);
   const borrowerRepo = borrowerRepository(db);
-  
-  // Create borrower account
-  router.post("/", authenticateToken, authorizeRole("manager"), async (req, res) => {
-    try {
-      const newBorrower = await createBorrower(req.body, db);
-
-      const creatorName = req.user.name;
-
-      await logRepo.insertActivityLog({
-        userId: req.user.userId,
-        name: req.user.name,
-        role: req.user.role,
-        action: "CREATE_BORROWER",
-        description: `${creatorName} added a new borrower account: ${newBorrower.name}`,
-      });
-
-      // Notify loan officer about the new borrower account
-      try {
-        await notifRepo.insertLoanOfficerNotification({
-          type: "borrower-account-created",
-          title: "New Borrower Account Created",
-          message: `${creatorName} has created a borrower account for ${newBorrower.borrower.name}. Application ID: ${req.body.applicationId}`,
-          applicationId: req.body.applicationId,
-          borrowersId: newBorrower.borrower.borrowersId,
-          actor: {
-            name: creatorName,
-            role: "Manager",
-          },
-          read: false,
-          viewed: false,
-          createdAt: new Date(),
-        });
-        console.log("Loan officer notified of new borrower account.");
-      } catch (notifyErr) {
-        console.error("Failed to notify loan officer:", notifyErr.message);
-      }
-
-      res.status(201).json(newBorrower);
-    } catch (err) {
-      console.error("Error adding borrower:", err);
-      res.status(400).json({ message: err.message });
-    }
-  });
 
   // Borrower login
   router.post("/login", async (req, res) => {
@@ -81,14 +38,19 @@ module.exports = (db) => {
     }
   });
 
-  router.post("/send-login-otp", async (req, res) => {
+  // Borrower registration (OTP verified)
+  router.post("/register", async (req, res) => {
     try {
-      const { borrowersId } = req.body;
-      const result = await sendLoginOtp(borrowersId, db);
-      res.json(result);
+      const { name, email, contactNumber, username, verificationMethod, otp, password } = req.body;
+      const newBorrower = await createBorrower(
+        { name, email, contactNumber, username, password, role: "borrower" },
+        db
+      );
+
+      res.status(201).json(newBorrower);
     } catch (err) {
-      console.error("Send OTP error:", err.message);
-      res.status(400).json({ error: err.message });
+      console.error("Register error:", err.message);
+      res.status(400).json({ message: err.message });
     }
   });
 
@@ -117,26 +79,45 @@ module.exports = (db) => {
 
   // Send OTP
   router.post("/send-otp", async (req, res) => {
-    try {
-      const { borrowersId } = req.body;
-      const result = await sendOtp(borrowersId, db);
-      res.json(result);
-    } catch (err) {
-      console.error("Send OTP error:", err.message);
-      res.status(400).json({ error: err.message });
-    }
-  });
+  try {
+    const { contactNumber } = req.body;
+    const result = await sendOtp(contactNumber, db);
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 
   // Verify OTP
   router.post("/verify-otp", async (req, res) => {
     try {
       const { borrowersId, otp } = req.body;
+      
+      // borrowersId here is actually the contactNumber for registration
       const result = await verifyOtp(borrowersId, otp);
       res.json(result);
     } catch (err) {
       console.error("Verify OTP error:", err.message);
       res.status(400).json({ error: err.message });
     }
+  });
+
+  router.post("/check-username", async (req, res) => {
+  try {
+    const { username } = req.body;
+    if (!username) {
+      return res.status(400).json({ message: "Username is required" });
+    }
+
+    const repo = borrowerRepository(db);
+    const usernameExists = await repo.findByUsername(username);
+
+    res.json({ usernameExists: !!usernameExists });
+  } catch (err) {
+    console.error("Check username error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
   });
 
   // Find borrower account (for login or password recovery)
@@ -228,6 +209,36 @@ module.exports = (db) => {
       }
     }
   );
+
+  // Check if email or contact number exists
+  router.post("/check-existing", async (req, res) => {
+    try {
+      const { email, contactNumber } = req.body;
+      if (!email && !contactNumber) {
+        return res.status(400).json({ message: "Email or contact number is required" });
+      }
+
+      const results = {};
+      const repo = borrowerRepository(db);
+
+      // Check email
+      if (email) {
+        const emailExists = await repo.findByUsernameOrEmail(email).catch(() => null);
+        results.emailExists = !!emailExists;
+      }
+
+      if (contactNumber) {
+        const contactExists = await repo.findByPhoneNumber(contactNumber);
+        results.contactExists = !!contactExists;
+      }
+
+      res.json(results);
+    } catch (err) {
+      console.error("Check existing error:", err);
+      res.status(500).json({ message: "Server error" });
+    }
+  });
+
 
   return router;
 };
