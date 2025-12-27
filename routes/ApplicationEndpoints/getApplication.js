@@ -89,7 +89,9 @@ module.exports = (db) => {
         return res.status(404).json({ error: "Application not found." });
       }
   
-      res.status(200).json(application);
+      // Decrypt the application data before sending to frontend
+      const decryptedApplication = loanAppService.decryptApplication(application);
+      res.status(200).json(decryptedApplication);
     } catch (error) {
       console.error("Error fetching loan application by ID:", error);
       res.status(500).json({ error: "Failed to fetch loan application." });
