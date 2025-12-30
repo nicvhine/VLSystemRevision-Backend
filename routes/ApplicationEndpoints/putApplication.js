@@ -32,6 +32,7 @@
 
   module.exports = (db) => {
     const loanApplications = db.collection("loan_applications");
+    const collection = db.collection("collections");
     const logRepo = LogRepository(db);
 
     router.put("/:applicationId", authenticateToken, authorizeRole("manager", "loan officer"), async (req, res) => {
@@ -293,6 +294,161 @@
         res.status(500).json({ error: "Failed to update principal" });
       }
     });
+
+  // Endorse Principal Change
+  router.post("/:applicationId/endorse-principal", authenticateToken, authorizeRole("loan officer"), async (req, res) => {
+    try {
+      const { applicationId } = req.params;
+      const { requestedPrincipal } = req.body;
+
+      const existingApp = await loanApplications.findOne({ applicationId });
+      if (!existingApp) return res.status(404).json({ error: "Loan not found" });
+
+      // Add principal change request fields to loan_applications
+      const updateData = {
+        pendingPrincipalChange: true,
+        requestedPrincipal: Number(requestedPrincipal),
+        principalChangeRequestedAt: new Date(),
+        principalChangeRequestedBy: req.user.userId,
+        principalChangeRequestedByName: req.user.name,
+      };
+
+      await loanApplications.updateOne({ applicationId }, { $set: updateData });
+      const updatedApp = await loanApplications.findOne({ applicationId });
+
+      // Log activity
+      const creatorName = req.user.name;
+      await logRepo.insertActivityLog({
+        userId: req.user.userId,
+        name: creatorName,
+        role: req.user.role,
+        action: "ENDORSE_PRINCIPAL",
+        description: `${creatorName} requested principal change from ₱${existingApp.appLoanAmount} to ₱${requestedPrincipal} for loan application ${applicationId}`,
+      });
+
+      res.status(201).json({
+        message: "Principal change request submitted for approval",
+        updatedApp,
+      });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to submit principal change request" });
+    }
+  });
+
+  // Approve Principal Change (Borrower)
+  router.post("/:applicationId/approve-principal-change", authenticateToken, async (req, res) => {
+    try {
+      const { applicationId } = req.params;
+
+      const existingApp = await loanApplications.findOne({ applicationId });
+      if (!existingApp) return res.status(404).json({ error: "Loan not found" });
+
+      if (!existingApp.pendingPrincipalChange || !existingApp.requestedPrincipal) {
+        return res.status(400).json({ error: "No pending principal change request" });
+      }
+
+      // Get loan type for calculations
+      let optionKey = "";
+      if (existingApp.loanType?.includes("With Collateral")) optionKey = "withCollateral";
+      else if (existingApp.loanType?.includes("Without Collateral")) optionKey = "withoutCollateral";
+      else optionKey = "openTerm";
+
+      const options = loanOptions[optionKey] || [];
+      const newPrincipal = existingApp.requestedPrincipal;
+      
+      let selectedOption;
+      if (optionKey === "openTerm") {
+        selectedOption = options.find(opt => opt.amount >= newPrincipal) || options[options.length - 1];
+      } else {
+        selectedOption =
+          options.find(opt => opt.amount === newPrincipal) ||
+          options.slice().sort((a, b) => b.amount - a.amount).find(opt => opt.amount <= newPrincipal) ||
+          options[0];
+      }
+
+      const months = selectedOption?.months || Number(existingApp.appLoanTerms) || 12;
+      const interestRate = selectedOption?.interest || Number(existingApp.appInterestRate) || 0;
+      const updatedFields = computeLoanFields(Number(newPrincipal), months, interestRate);
+
+      // Update with new principal and clear pending flag
+      const updateData = {
+        ...updatedFields,
+        pendingPrincipalChange: false,
+        requestedPrincipal: null,
+        principalChangeRequestedAt: null,
+        principalChangeRequestedBy: null,
+        principalChangeRequestedByName: null,
+        principalChangeApprovedAt: new Date(),
+        principalChangeApprovedBy: req.user.userId,
+      };
+
+      await loanApplications.updateOne({ applicationId }, { $set: updateData });
+      const updatedApp = await loanApplications.findOne({ applicationId });
+
+      // Log activity
+      await logRepo.insertActivityLog({
+        userId: req.user.userId,
+        name: req.user.name,
+        role: req.user.role,
+        action: "APPROVE_PRINCIPAL_CHANGE",
+        description: `${req.user.name} approved principal change to ₱${newPrincipal} for loan application ${applicationId}`,
+      });
+
+      res.status(200).json({
+        message: "Principal change approved successfully",
+        updatedApp,
+      });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to approve principal change" });
+    }
+  });
+
+  // Reject Principal Change (Borrower)
+  router.post("/:applicationId/reject-principal-change", authenticateToken, async (req, res) => {
+    try {
+      const { applicationId } = req.params;
+
+      const existingApp = await loanApplications.findOne({ applicationId });
+      if (!existingApp) return res.status(404).json({ error: "Loan not found" });
+
+      if (!existingApp.pendingPrincipalChange || !existingApp.requestedPrincipal) {
+        return res.status(400).json({ error: "No pending principal change request" });
+      }
+
+      // Clear pending flag without applying changes
+      const updateData = {
+        pendingPrincipalChange: false,
+        requestedPrincipal: null,
+        principalChangeRequestedAt: null,
+        principalChangeRequestedBy: null,
+        principalChangeRequestedByName: null,
+        principalChangeRejectedAt: new Date(),
+        principalChangeRejectedBy: req.user.userId,
+      };
+
+      await loanApplications.updateOne({ applicationId }, { $set: updateData });
+      const updatedApp = await loanApplications.findOne({ applicationId });
+
+      // Log activity
+      await logRepo.insertActivityLog({
+        userId: req.user.userId,
+        name: req.user.name,
+        role: req.user.role,
+        action: "REJECT_PRINCIPAL_CHANGE",
+        description: `${req.user.name} rejected principal change request for loan application ${applicationId}`,
+      });
+
+      res.status(200).json({
+        message: "Principal change rejected",
+        updatedApp,
+      });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to reject principal change" });
+    }
+  });
 
   // Save Service Fee & Net Released before printing
   router.put("/:applicationId/release", authenticateToken, authorizeRole("manager", "loan officer"), async (req, res) => {
