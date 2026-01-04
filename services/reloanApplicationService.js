@@ -35,6 +35,37 @@ async function createReloanApplication(req, loanType, repo, db, uploadedFiles) {
     collateralType, collateralValue, collateralDescription, ownershipStatus
   } = req.body;
 
+  // --- VALIDATE: No pending applications ---
+  if (!borrowersId) throw new Error("BorrowersId is required for reloan application.");
+
+  // Check for ANY pending application (status is not final/active)
+  const pendingApplication = await db.collection("loan_applications").findOne({
+    borrowersId,
+    status: { $in: ["Applied", "Pending", "Cleared", "Approved"] }
+  });
+
+  if (pendingApplication) {
+    const status = pendingApplication.status;
+    throw new Error(
+      `You already have a ${status.toLowerCase()} restructuring application. ` +
+      `Please wait for it to be processed before applying again.`
+    );
+  }
+
+  // --- VALIDATE: Old loan status ---
+  const oldLoan = await db.collection("loans").findOne({
+    borrowersId,
+    status: "Active"
+  });
+
+  if (!oldLoan) {
+    throw new Error("No active loan found. You must have an active loan to apply for reloan.");
+  }
+
+  if (oldLoan.status === "Restructured") {
+    throw new Error("You already have an active restructured loan from a previous reloan. You cannot apply for another reloan yet.");
+  }
+
   // --- Validate agent ---
   if (!appAgent) throw new Error("Agent must be selected.");
   let assignedAgent = null;

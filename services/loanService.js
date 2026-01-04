@@ -7,8 +7,8 @@ const createLoan = async (applicationId, db) => {
 
   const application = await repo.findApplicationById(applicationId);
   if (!application) throw new Error("Application not found");
-  if (application.status !== "Disbursed")
-    throw new Error("Loan can only be generated for applications with status 'Disbursed'");
+  if (application.status !== "Active")
+    throw new Error("Loan can only be generated for applications with status 'Active'");
 
   const existingLoan = await repo.findExistingLoan(applicationId);
   if (existingLoan)
@@ -20,6 +20,64 @@ const createLoan = async (applicationId, db) => {
   const borrower = await repo.findBorrowerById(application.borrowersId);
   if (!borrower)
     throw new Error("Borrower not found for the given borrowersId.");
+
+  // Check if this is a reloan application
+  const isReloan = application.loanType?.includes("Reloan") || application.applicationType === "Reloan";
+  let oldLoanId = null;
+
+  if (isReloan) {
+    // Find the most recent active loan for this borrower
+    const activeLoans = await db.collection("loans")
+      .find({ borrowersId: borrower.borrowersId, status: "Active" })
+      .sort({ createdAt: -1 })
+      .limit(1)
+      .toArray();
+
+    if (activeLoans.length > 0) {
+      oldLoanId = activeLoans[0].loanId;
+
+      // Mark the old loan as "Restructured"
+      await repo.updateLoanStatus(oldLoanId, "Restructured");
+      await repo.updateLoanRestructure(oldLoanId, {
+        restructuredAt: new Date(),
+      });
+
+      // Mark all unpaid/partial collections as "Transferred"
+      const oldCollections = await repo.findLoanCollections(oldLoanId);
+      for (const col of oldCollections) {
+        if (col.status === "Unpaid" || col.status === "Partial") {
+          await db.collection("collections").updateOne(
+            { referenceNumber: col.referenceNumber },
+            { $set: { status: "Transferred", transferredAt: new Date() } }
+          );
+        }
+      }
+
+      // Close the old application
+      await db.collection("loan_applications").updateOne(
+        { applicationId: oldLoanId },
+        { $set: { status: "Restructured" } }
+      );
+    }
+  } else {
+    // Not a reloan: close any previously active loans
+    const activeLoans = await repo.findActiveLoansByBorrowerId(borrower.borrowersId);
+    for (const activeLoan of activeLoans) {
+      await repo.updateLoanStatus(activeLoan.loanId, "Completed");
+
+      await db.collection("loan_applications").updateOne(
+        { applicationId: activeLoan.applicationId },
+        { $set: { status: "Completed" } }
+      );
+
+      const collections = await repo.findCollectionsByLoan(activeLoan.loanId);
+      for (const col of collections) {
+        if (col.status === "Unpaid" || col.status === "Partial") {
+          await repo.updateCollectionStatus(col.referenceNumber, "Completed");
+        }
+      }
+    }
+  }
 
   // Auto-increment loanId
   const maxLoan = await repo.getMaxLoan();
@@ -38,6 +96,9 @@ const createLoan = async (applicationId, db) => {
     balance: Number(application.appTotalPayable),
     status: "Active",
     loanType: application.loanType,
+    restructuredFromLoanId: oldLoanId || undefined,
+    restructureReason: isReloan ? "reloan" : undefined,
+    restructureDate: isReloan ? new Date() : undefined,
     dateDisbursed: application.dateDisbursed || new Date(),
     creditScore: 10,
     appInterestRate: Number(application.appInterestRate) || 0,
@@ -73,8 +134,12 @@ const createLoan = async (applicationId, db) => {
       collectionNumber: i + 1,
       dueDate,
       periodAmount: monthlyDue,
+      periodInterestAmount: interestAmount,
+      periodInterestRate: interestRate,
       paidAmount: 0,
       periodBalance: monthlyDue,
+      loanBalance: runningBalance,
+      runningBalance: runningBalance,
       status: "Unpaid",
       collector: borrower.assignedCollector || "",
       collectorId: borrower.assignedCollectorId,
@@ -82,6 +147,8 @@ const createLoan = async (applicationId, db) => {
       createdAt: new Date(),
       updatedAt: new Date(),
     });
+
+    runningBalance -= monthlyDue;
   }
 
   if (collections.length > 0) {
@@ -108,6 +175,27 @@ const createOpenTermLoan = async (applicationId, db) => {
   const existingLoan = await repo.findExistingLoan(applicationId);
   if (existingLoan)
     throw new Error("Loan already exists for this application");
+
+  // **NEW: Close previously active loans for this borrower**
+  const activeLoans = await repo.findActiveLoansByBorrowerId(borrower.borrowersId);
+  for (const activeLoan of activeLoans) {
+    // Close the loan
+    await repo.updateLoanStatus(activeLoan.loanId, "Closed");
+
+    // Close the corresponding application
+    await db.collection("loan_applications").updateOne(
+      { applicationId: activeLoan.applicationId },
+      { $set: { status: "Closed" } }
+    );
+
+    // Close all collections for that loan (mark Unpaid/Partial as Paid)
+    const collections = await repo.findCollectionsByLoan(activeLoan.loanId);
+    for (const col of collections) {
+      if (col.status === "Unpaid" || col.status === "Partial") {
+        await repo.updateCollectionStatus(col.referenceNumber, "Closed");
+      }
+    }
+  }
 
   // Auto-increment loanId
   const maxLoan = await repo.getMaxLoan();

@@ -3,6 +3,7 @@ const router = express.Router();
 const bcrypt = require('bcrypt');
 require('dotenv').config();
 const authenticateToken = require('../../middleware/auth');
+const { encrypt } = require('../../utils/crypt');
 
 module.exports = (db) => {
   const borrowers = db.collection("borrowers_account");
@@ -193,12 +194,12 @@ module.exports = (db) => {
     const normalizedEmail = email.trim().toLowerCase();
 
     try {
-      const existingUser = await borrowers.findOne({ email: normalizedEmail });
+      const existingUser = await borrowers.findOne({ email: encrypt(normalizedEmail) });
       if (existingUser && existingUser.borrowersId !== borrowersId) {
         return res.status(409).json({ error: 'Email already in use.' });
       }
 
-      await borrowers.updateOne({ borrowersId }, { $set: { email: normalizedEmail } });
+      await borrowers.updateOne({ borrowersId }, { $set: { email: encrypt(normalizedEmail) } });
 
     
       res.status(200).json({ message: 'Email updated successfully' });
@@ -218,12 +219,12 @@ module.exports = (db) => {
     if (!phoneNumber) return res.status(400).json({ error: 'Phone number is required' });
 
     try {
-      const existingUser = await borrowers.findOne({ phoneNumber });
+      const existingUser = await borrowers.findOne({ phoneNumber: encrypt(phoneNumber) });
       if (existingUser && existingUser.borrowersId !== borrowersId) {
         return res.status(409).json({ error: 'Phone number already in use.' });
       }
 
-      await borrowers.updateOne({ borrowersId }, { $set: { phoneNumber } });
+      await borrowers.updateOne({ borrowersId }, { $set: { phoneNumber: encrypt(phoneNumber) } });
 
       res.status(200).json({ message: 'Phone number updated successfully' });
     } catch (err) {

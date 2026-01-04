@@ -48,7 +48,7 @@ module.exports = (db) => {
   router.get("/archive", authenticateToken, authorizeRole("loan officer", "head", "manager"), async (req, res) => {
     try {
       const allApps = await loanAppService.getAllApplications(repo);
-      const deniedApps = allApps.filter((app) => app.status === "Denied" || app.status === "Denied by LO");
+      const deniedApps = allApps.filter((app) => app.status === "Denied" || app.status === "Denied by LO" || app.status === "Withdrawn");
 
       res.status(200).json(deniedApps);
     } catch (error) {

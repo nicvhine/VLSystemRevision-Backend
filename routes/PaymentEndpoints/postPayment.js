@@ -97,12 +97,22 @@ module.exports = (db) => {
         const { borrowersId } = req.user;
         const referenceNumber = req.params.referenceNumber;
   
+        console.log(`[PAYMONGO_SUCCESS] Starting success handler for ${referenceNumber}, borrower: ${borrowersId}`);
+
         const collection = await db.collection("collections").findOne({ referenceNumber });
-        if (!collection) return res.status(404).json({ error: "Collection not found" });
-        if (collection.borrowersId !== borrowersId) return res.status(403).json({ error: "You can only confirm payments for your own loans." });
+        if (!collection) {
+          console.error(`[ERROR] Collection not found: ${referenceNumber}`);
+          return res.status(404).json({ error: "Collection not found" });
+        }
+        if (collection.borrowersId !== borrowersId) {
+          console.error(`[ERROR] Borrower mismatch. Expected ${collection.borrowersId}, got ${borrowersId}`);
+          return res.status(403).json({ error: "You can only confirm payments for your own loans." });
+        }
   
         // Handle PayMongo payment
+        console.log(`[PAYMONGO_SUCCESS] Calling handlePaymongoSuccess for ${referenceNumber}`);
         const result = await paymentService.handlePaymongoSuccess(referenceNumber, db);
+        console.log(`[PAYMONGO_SUCCESS] Payment processed successfully`, { referenceNumber, amount: result.amount, paymentLogs: result.paymentLogs?.length });
   
         // Notify borrower
         if (result?.borrowersId && result?.amount) {
@@ -141,8 +151,9 @@ module.exports = (db) => {
   
         res.json({ success: true, ...result });
       } catch (err) {
-        console.error("PayMongo success error:", err);
-        res.status(500).json({ error: "Internal server error" });
+        console.error("PayMongo success error:", err.message);
+        if (process.env.DEBUG_PAYMENT === 'true') console.error("Stack:", err.stack);
+        res.status(500).json({ error: "Internal server error", message: err.message });
       }
     }
   );

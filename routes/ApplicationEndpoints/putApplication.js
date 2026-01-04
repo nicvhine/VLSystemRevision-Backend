@@ -35,10 +35,17 @@
     const collection = db.collection("collections");
     const logRepo = LogRepository(db);
 
-    router.put("/:applicationId", authenticateToken, authorizeRole("manager", "loan officer"), async (req, res) => {
+    router.put("/:applicationId", authenticateToken, authorizeRole("manager", "loan officer", "borrower"), async (req, res) => {
       try {
         const { applicationId } = req.params;
-        const updateData = req.body;
+        let updateData = req.body;
+
+        // Remove immutable fields
+        delete updateData._id;
+        delete updateData.applicationId;
+        delete updateData.dateApplied;
+        delete updateData.createdAt;
+        delete updateData.updatedAt;
 
         // Add pending date if status is "Pending"
         if (typeof updateData.status === "string" && updateData.status.trim().toLowerCase() === "pending") {

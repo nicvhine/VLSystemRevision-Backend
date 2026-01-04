@@ -55,9 +55,24 @@ module.exports = (db) => {
       return await loans.find({ borrowersId, status: "Active" }).toArray();
     },
 
+    // Find a single loan by loanId
+    findLoan: async (loanId) => {
+      return await loans.findOne({ loanId });
+    },
+
+    // Find all collections for a loan
+    findLoanCollections: async (loanId) => {
+      return await collections.find({ loanId }).sort({ collectionNumber: 1 }).toArray();
+    },
+
     // Update loan status
     updateLoanStatus: async (loanId, status) => {
       await loans.updateOne({ loanId }, { $set: { status } });
+    },
+
+    // Update loan restructure info
+    updateLoanRestructure: async (loanId, updateData) => {
+      await loans.updateOne({ loanId }, { $set: updateData });
     },
 
     // Find collections by loanId

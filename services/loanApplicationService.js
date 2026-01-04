@@ -74,6 +74,22 @@ async function createLoanApplication(req, loanType, repo, db, uploadedFiles, bor
     if (!assignedAgent) throw new Error("Selected agent does not exist.");
   }
 
+  // --- VALIDATE: No pending applications (if borrowersId is provided) ---
+  if (borrowersId) {
+    const pendingApplication = await db.collection("loan_applications").findOne({
+      borrowersId,
+      status: { $in: ["Applied", "Pending", "Cleared", "Approved"] }
+    });
+
+    if (pendingApplication) {
+      const status = pendingApplication.status;
+      throw new Error(
+        `You already have a ${status.toLowerCase()} application. ` +
+        `Please wait for it to be processed before applying again.`
+      );
+    }
+  }
+
   // --- Validate references ---
   let parsedReferences = [];
   try {

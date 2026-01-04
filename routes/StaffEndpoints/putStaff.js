@@ -2,7 +2,8 @@ const express = require('express');
 const router = express.Router();
 const authenticateToken = require('../../middleware/auth');
 const bcrypt = require('bcrypt');
-const LogRepository = require('../../repositories/logRepository'); 
+const LogRepository = require('../../repositories/logRepository');
+const { encrypt } = require('../../utils/crypt'); 
 
 module.exports = (db) => {
   const users = db.collection('users');
@@ -76,12 +77,12 @@ module.exports = (db) => {
     const normalizedEmail = email.trim().toLowerCase();
 
     try {
-      const existingUser = await users.findOne({ email: normalizedEmail });
+      const existingUser = await users.findOne({ email: encrypt(normalizedEmail) });
       if (existingUser && existingUser.userId !== userId) {
         return res.status(409).json({ error: 'Email already in use.' });
       }
 
-      await users.updateOne({ userId }, { $set: { email: normalizedEmail } });
+      await users.updateOne({ userId }, { $set: { email: encrypt(normalizedEmail) } });
 
       // Log action
       await logAction(req.user, "Update Email", `${req.user.name} updated email to ${normalizedEmail}`);
@@ -103,12 +104,12 @@ module.exports = (db) => {
     if (!phoneNumber) return res.status(400).json({ error: 'Phone number is required' });
 
     try {
-      const existingUser = await users.findOne({ phoneNumber });
+      const existingUser = await users.findOne({ phoneNumber: encrypt(phoneNumber) });
       if (existingUser && existingUser.userId !== userId) {
         return res.status(409).json({ error: 'Phone number already in use.' });
       }
 
-      await users.updateOne({ userId }, { $set: { phoneNumber } });
+      await users.updateOne({ userId }, { $set: { phoneNumber: encrypt(phoneNumber) } });
 
       // Log action
       await logAction(req.user, "Update Phone", `${req.user.name} updated phone number`);

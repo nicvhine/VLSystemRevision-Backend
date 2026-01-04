@@ -59,17 +59,107 @@ const generateNextOpenTermCollection = async (db, loan, lastCollection) => {
 };
 
 
+const DEBUG = process.env.DEBUG_PAYMENT === 'true'; // Enable with DEBUG_PAYMENT=true
+
 const applyPayment = async ({ referenceNumber, amount, collectorName, mode }, db) => {
   if (!amount || isNaN(amount) || amount <= 0) throw new Error("Invalid payment amount");
 
   const repo = paymentRepository(db);
   const now = new Date();
 
+  console.log(`\n[PAYMENT_START] Processing payment of ₱${amount} for collection ${referenceNumber}, mode: ${mode}`);
+  if (DEBUG) console.log(`[DEBUG_ENABLED] Full debugging active for this transaction`);
+
   // Fetch collection and previous status
-  const collection = await repo.findCollection(referenceNumber);
+  let collection = await repo.findCollection(referenceNumber);
   if (!collection) throw new Error("Collection not found");
+  
+  console.log(`[COLLECTION_BEFORE] referenceNumber: ${collection.referenceNumber}, status: ${collection.status}, paidAmount: ${collection.paidAmount}, periodAmount: ${collection.periodAmount}`);
+
+  // Check if this collection was transferred to a new loan (due to reloan)
+  if (collection.status === "Transferred") {
+    console.log(`[TRANSFERRED_COLLECTION] Collection ${referenceNumber} has been transferred (reloan). Redirecting payment to new loan.`);
+    
+    // Find the new loan that this old loan was restructured into
+    const oldLoan = await repo.findLoan(collection.loanId);
+    const newLoan = await db.collection("loans").findOne({ 
+      restructuredFromLoanId: collection.loanId,
+      status: "Active" 
+    });
+
+    if (!newLoan) {
+      throw new Error("This collection has been transferred due to reloan, but the new loan could not be found. Please contact support.");
+    }
+
+    console.log(`[TRANSFERRED_REDIRECT] Old loan: ${collection.loanId}, New loan: ${newLoan.loanId}. Applying ₱${amount} to new loan's balance.`);
+
+    // Apply payment directly to new loan's remaining balance
+    const newLoanCollections = await repo.findLoanCollections(newLoan.loanId);
+    if (newLoanCollections.length === 0) {
+      throw new Error("New loan has no collections. Please contact support.");
+    }
+
+    // Apply to the first unpaid collection of the new loan
+    const unpaidCollections = newLoanCollections.filter(c => c.status === "Unpaid" || c.status === "Partial");
+    if (unpaidCollections.length === 0) {
+      throw new Error("New loan has no unpaid collections.");
+    }
+
+    // Redirect to first unpaid collection of new loan
+    const redirectedReferenceNumber = unpaidCollections[0].referenceNumber;
+    console.log(`[TRANSFERRED_REDIRECT_TARGET] Redirecting to collection ${redirectedReferenceNumber}`);
+
+    // Log the transfer redirection
+    const transferLog = {
+      loanId: collection.loanId,
+      referenceNumber: `TRANSFER-${referenceNumber}-${now.getTime()}`,
+      borrowersId: collection.borrowersId,
+      amount,
+      mode,
+      originalCollection: referenceNumber,
+      redirectedToCollection: redirectedReferenceNumber,
+      redirectedToLoan: newLoan.loanId,
+      reason: "Reloan - Payment transferred to new loan",
+      datePaid: now,
+      createdAt: now,
+    };
+    
+    await db.collection("payment-logs").insertOne(transferLog);
+    console.log(`[TRANSFER_LOG_CREATED] Logged transfer of payment from ${referenceNumber} to ${redirectedReferenceNumber}`);
+
+    // Recursively apply payment to the new collection
+    return await applyPayment({ referenceNumber: redirectedReferenceNumber, amount, collectorName, mode }, db);
+  }
+
+  // Check if payment already fully applied to prevent double-charging
+  if (collection.status === "Paid") {
+    console.warn(`[WARNING] Collection ${referenceNumber} is already fully paid. Preventing duplicate payment.`);
+    throw new Error("This collection has already been fully paid");
+  }
+
+  // Check for duplicate payment records - if this collection was just paid by looking at recent payment logs
+  const recentPayments = await db.collection("payment-logs").find({
+    referenceNumber: { $regex: `^${collection.referenceNumber}` }
+  }).sort({ createdAt: -1 }).limit(5).toArray();
+  
+  console.log(`[RECENT_PAYMENTS] Found ${recentPayments.length} recent payments for collection ${collection.referenceNumber}`);
+  
+  if (recentPayments.length > 0) {
+    const lastPayment = recentPayments[0];
+    const timeSinceLastPayment = now.getTime() - new Date(lastPayment.createdAt).getTime();
+    const totalRecentAmount = recentPayments.reduce((sum, p) => sum + (p.amount || 0), 0);
+    
+    console.log(`[DUPLICATE_CHECK] Time since last: ${timeSinceLastPayment}ms, Recent total amount: ₱${totalRecentAmount}, Current: ₱${amount}`);
+    
+    // If recent payments total close to the amount being applied (within 10%), it's likely a duplicate
+    if (timeSinceLastPayment < 10000 && Math.abs(totalRecentAmount - amount) < (amount * 0.1)) {
+      console.warn(`[WARNING] Duplicate payment detected for ${referenceNumber}. Recent payments total: ${totalRecentAmount}, Current amount: ${amount}. Skipping.`);
+      throw new Error("Duplicate payment detected. This collection may have already been paid by this transaction.");
+    }
+  }
+
   const prevStatus = collection.status;
-  console.log("[DEBUG] Previous collection status:", prevStatus);
+  console.log("[DEBUG] Previous collection status:", prevStatus, "Amount to apply:", amount);
 
   // Fetch loan
   const loan = await repo.findLoan(collection.loanId);
@@ -116,7 +206,7 @@ const applyPayment = async ({ referenceNumber, amount, collectorName, mode }, db
       referenceNumber: generatePaymentRef(collection.referenceNumber),
       borrowersId: collection.borrowersId,
       collector: collection.collector || "Cash Collector",
-      amount,
+      amount: interestPaid + principalPaid,
       meta: { interestPaid, principalPaid },
       interestPaid,
       principalPaid,
@@ -126,62 +216,114 @@ const applyPayment = async ({ referenceNumber, amount, collectorName, mode }, db
       datePaid: now,
       createdAt: now,
     };
+
+    console.log(`[PAYMENT_LOG_OPEN_TERM] Created payment log with amount: ₱${log.amount}, interestPaid: ₱${interestPaid}, principalPaid: ₱${principalPaid}`);
+
     paymentLogs.push(log);
     await repo.insertPayments([log]);
 
-    await repo.incrementLoan(loan.loanId, { paidAmount: amount, balance: -principalPaid });
+    console.log(`[LOAN_INCREMENT] Incrementing loan ${loan.loanId} with paidAmount: ₱${interestPaid + principalPaid}, balance decrement: ₱${principalPaid}`);
+    await repo.incrementLoan(loan.loanId, { paidAmount: interestPaid + principalPaid, balance: -principalPaid });
 
     if (collection.periodBalance <= 0 && newLoanBalanceSnapshot > 0) {
       const updatedLoan = await repo.findLoan(loan.loanId);
       await generateNextOpenTermCollection(db, updatedLoan, collection);
     }
   } else {
-    // --- FIXED-TERM LOAN ---
-    const loanCollections = await repo.findLoanCollections(collection.loanId);
-    for (let col of loanCollections) {
-      if (remainingAmount <= 0) break;
-
-      const due = col.periodAmount || 0;
-      const alreadyPaid = col.paidAmount || 0;
+    // --- FIXED-TERM LOAN WITH CASCADING ---
+    console.log(`[FIXED_TERM_START] Processing fixed-term loan for collection ${referenceNumber}, cascading enabled`);
+    
+    let currentCollection = collection;
+    let collectionIndex = await repo.findLoanCollections(collection.loanId).then(cols => 
+      cols.findIndex(c => c.referenceNumber === collection.referenceNumber)
+    );
+    
+    // Get all collections for this loan
+    const allCollections = await repo.findLoanCollections(collection.loanId);
+    
+    console.log(`[FIXED_TERM_COLLECTIONS] Found ${allCollections.length} collections, starting at index ${collectionIndex}`);
+    
+    let totalApplied = 0;
+    
+    // Process collections in order, cascading if needed
+    while (remainingAmount > 0 && collectionIndex < allCollections.length) {
+      currentCollection = allCollections[collectionIndex];
+      
+      console.log(`[CASCADING_PAYMENT] Processing collection ${collectionIndex}: ${currentCollection.referenceNumber}`);
+      
+      const due = Number(currentCollection.periodAmount || 0);
+      const alreadyPaid = Number(currentCollection.paidAmount || 0);
       const periodRemaining = Math.max(due - alreadyPaid, 0);
-      if (periodRemaining <= 0) continue;
-
+      
+      console.log(`[COLLECTION_DETAILS] Due: ₱${due}, Already Paid: ₱${alreadyPaid}, Remaining: ₱${periodRemaining}`);
+      
+      // If this collection is already paid, skip to next
+      if (periodRemaining <= 0) {
+        console.log(`[COLLECTION_SKIP] Collection already paid, moving to next`);
+        collectionIndex++;
+        continue;
+      }
+      
+      // Apply payment to this collection
       const paymentToApply = Math.min(remainingAmount, periodRemaining);
       const newPaidAmount = alreadyPaid + paymentToApply;
-
-      const prevColStatus = col.status;
-
-      await repo.updateCollection(col.referenceNumber, {
+      const newPeriodBalance = Math.max(due - newPaidAmount, 0);
+      const prevColStatus = currentCollection.status;
+      
+      console.log(`[PAYMENT_APPLYING] Applying ₱${paymentToApply} to collection ${currentCollection.collectionNumber}`);
+      
+      await repo.updateCollection(currentCollection.referenceNumber, {
         paidAmount: newPaidAmount,
-        periodBalance: Math.max(due - newPaidAmount, 0),
+        periodBalance: newPeriodBalance,
         status: newPaidAmount >= due ? "Paid" : "Partial",
-        loanBalance: Math.max((col.loanBalance || col.periodAmount) - paymentToApply, 0),
+        loanBalance: Math.max((currentCollection.loanBalance || currentCollection.periodAmount) - paymentToApply, 0),
         mode,
         paidAt: now,
       });
-
-      console.log("[DEBUG] Fixed-Term collection updated:", col.referenceNumber, "PrevStatus:", prevColStatus, "NewStatus:", newPaidAmount >= due ? "Paid" : "Partial");
-
-      paymentLogs.push({
-        loanId: col.loanId,
-        referenceNumber: generatePaymentRef(col.referenceNumber),
-        borrowersId: col.borrowersId,
-        collector: col.collector,
+      
+      const paymentLogEntry = {
+        loanId: collection.loanId,
+        referenceNumber: generatePaymentRef(currentCollection.referenceNumber),
+        borrowersId: collection.borrowersId,
+        collector: collection.collector,
         amount: paymentToApply,
-        balance: Math.max(due - newPaidAmount, 0),
-        paidToCollection: col.collectionNumber,
+        balance: newPeriodBalance,
+        paidToCollection: currentCollection.collectionNumber,
         mode,
         datePaid: now,
         prevStatus: prevColStatus,
         createdAt: now,
-      });
-
+      };
+      
+      console.log(`[PAYMENT_LOG] Collection ${currentCollection.collectionNumber}: ₱${paymentToApply}`);
+      
+      paymentLogs.push(paymentLogEntry);
+      totalApplied += paymentToApply;
       remainingAmount -= paymentToApply;
+      
+      console.log(`[PROGRESS] Total applied: ₱${totalApplied}, Remaining: ₱${remainingAmount}`);
+      
+      collectionIndex++;
     }
-
-    const totalApplied = amount - remainingAmount;
+    
+    console.log(`[FIXED_TERM_COMPLETE] Total applied: ₱${totalApplied}, Payment logs created: ${paymentLogs.length}`);
+    
+    if (DEBUG) {
+      console.log(`[DEBUG] Payment logs breakdown:`);
+      paymentLogs.forEach((log, idx) => {
+        console.log(`  [${idx}] Collection ${log.paidToCollection}: ₱${log.amount}`);
+      });
+    }
+    
+    if (paymentLogs.length > 0) {
+      if (DEBUG) console.log(`[DEBUG] About to insert ${paymentLogs.length} payment logs`);
+      await repo.insertPayments(paymentLogs);
+      console.log(`[PAYMENTS_INSERTED] ${paymentLogs.length} payment log(s) inserted`);
+    }
+    
+    if (DEBUG) console.log(`[DEBUG] About to increment loan with paidAmount: ₱${totalApplied}, balance: -₱${totalApplied}`);
     await repo.incrementLoan(collection.loanId, { paidAmount: totalApplied, balance: -totalApplied });
-    if (paymentLogs.length > 0) await repo.insertPayments(paymentLogs);
+    console.log(`[LOAN_INCREMENT] Incrementing loan ${collection.loanId} with paidAmount: ₱${totalApplied}`);
   }
 
   // --- UPDATE LOAN STATUS ---
@@ -189,45 +331,22 @@ const applyPayment = async ({ referenceNumber, amount, collectorName, mode }, db
   const loanStatus = determineLoanStatus(updatedLoanCollections);
   await repo.updateLoan(collection.loanId, { status: loanStatus });
 
-  // --- ADJUST CREDIT SCORE BASED ON PREVIOUS STATUS ---
-  if (loan.loanId) {
-    let delta = 0;
-    console.log("[DEBUG] Previous collection status for creditScore adjustment:", prevStatus);
-
-    switch (prevStatus) {
-      case "Unpaid":
-        delta = 0.5;
-        break;
-      case "Past Due":
-        delta = -0.5;
-        break;
-      case "Overdue":
-        delta = -1.5;
-        break;
-      default:
-        delta = 0;
-    }
-
-    console.log("[DEBUG] Credit score delta calculated:", delta);
-
-    if (delta !== 0) {
-      const currentLoan = await db.collection("loans").findOne({ loanId: loan.loanId });
-      console.log("[DEBUG] Current loan creditScore before update:", currentLoan.creditScore);
-
-      const newCreditScore = Math.min(Math.max((currentLoan.creditScore || 0) + delta, 0), 10);
-
-      console.log("[DEBUG] New creditScore to set:", newCreditScore);
-
-      await db.collection("loans").updateOne(
-        { loanId: loan.loanId },
-        { $set: { creditScore: newCreditScore } }
-      );
-    }
-  }
-
-
   // Fetch updated collection to return
   const updatedCollection = await repo.findCollection(referenceNumber);
+
+  console.log(`[COLLECTION_AFTER] referenceNumber: ${updatedCollection.referenceNumber}, status: ${updatedCollection.status}, paidAmount: ${updatedCollection.paidAmount}`);
+  const totalPaymentAmount = paymentLogs.reduce((sum, p) => sum + (p.amount || 0), 0);
+  console.log(`[PAYMENT_END] Payment of ₱${amount} for ${referenceNumber} completed. Payment logs created: ${paymentLogs.length}, Total amount in logs: ₱${totalPaymentAmount}`);
+  
+  if (DEBUG) {
+    console.log(`[DEBUG_FINAL] Input amount: ₱${amount}`);
+    console.log(`[DEBUG_FINAL] Total applied in logs: ₱${totalPaymentAmount}`);
+    console.log(`[DEBUG_FINAL] Remaining unapplied: ₱${remainingAmount}`);
+    if (totalPaymentAmount > amount) {
+      console.error(`[ERROR_DETECTED] Applied amount (₱${totalPaymentAmount}) exceeds input (₱${amount})!`);
+    }
+  }
+  console.log(`\n`);
 
   return {
     message: `${mode} payment applied successfully`,
@@ -247,43 +366,127 @@ const handleCashPayment = async (payload, db) => applyPayment({ ...payload, mode
 // Handle PayMongo success callback
 const handlePaymongoSuccess = async (referenceNumber, db) => {
   const repo = paymentRepository(db);
-  const paymongoPayment = await repo.findPaymongoPayment(referenceNumber);
-  if (!paymongoPayment) throw new Error("PayMongo payment not found");
+  
+  try {
+    // Step 1: Fetch current payment
+    const currentPayment = await repo.findPaymongoPayment(referenceNumber);
+    if (!currentPayment) {
+      throw new Error(`PayMongo payment record not found for ${referenceNumber}`);
+    }
 
-  const now = new Date();
-  await repo.updatePaymongoPayment(referenceNumber, { status: "success", paidAt: now });
+    // Step 2: Check if already processed or being processed
+    if (currentPayment.status === "success") {
+      console.warn(`[WARNING] PayMongo payment ${referenceNumber} already marked as success. Preventing duplicate.`);
+      const collection = await repo.findCollection(referenceNumber);
+      return {
+        message: "Payment already processed",
+        borrowersId: currentPayment.borrowersId,
+        amount: currentPayment.amount,
+        referenceNumber,
+        paymentLogs: [],
+        alreadyProcessed: true,
+        ...collection,
+      };
+    }
 
-  // Apply payment to collections/loan
-  const result = await applyPayment({
-    referenceNumber,
-    amount: paymongoPayment.amount,
-    mode: "Paymongo",
-  }, db);
+    if (currentPayment.status === "processing") {
+      console.warn(`[WARNING] PayMongo payment ${referenceNumber} is currently being processed. Preventing concurrent processing.`);
+      // Wait a bit for the processing to complete, then fetch again
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      const updatedPayment = await repo.findPaymongoPayment(referenceNumber);
+      if (updatedPayment.status === "success") {
+        const collection = await repo.findCollection(referenceNumber);
+        return {
+          message: "Payment already processed by concurrent request",
+          borrowersId: updatedPayment.borrowersId,
+          amount: updatedPayment.amount,
+          referenceNumber,
+          paymentLogs: [],
+          alreadyProcessed: true,
+          ...collection,
+        };
+      }
+      throw new Error("Payment is being processed by another request. Please try again.");
+    }
 
-  // Notify assigned collector if present
-  const borrower = await db.collection("borrowers_account").findOne(
-    { borrowersId: paymongoPayment.borrowersId },
-    { projection: { assignedCollectorId: 1, name: 1 } }
-  );
-
-  if (borrower?.assignedCollectorId) {
-    const decryptedName = borrower.name ? decrypt(borrower.name) : "Unknown";
-    const notifRepo = require("../repositories/notificationRepository")(db);
-
-    await notifRepo.insertCollectorNotification({
-      type: "paymongo-payment-received",
-      title: "PayMongo Payment Received",
-      message: `Payment of ${paymongoPayment.amount} via PayMongo for collection ${referenceNumber} has been received from ${decryptedName}.`,
-      referenceNumber,
-      actor: decryptedName,
-      collectorId: borrower.assignedCollectorId,
-      read: false,
-      viewed: false,
-      createdAt: now,
+    // Step 3: Mark as processing to prevent race conditions
+    await repo.updatePaymongoPayment(referenceNumber, { 
+      status: "processing", 
+      updatedAt: new Date(),
+      processingStartedAt: new Date()
     });
-  }
+    console.log(`[PROCESSING_STARTED] PayMongo payment ${referenceNumber} marked as processing`);
+    if (DEBUG) console.log(`[DEBUG] Processing lock acquired for ${referenceNumber} at ${new Date().toISOString()}`);
 
-  return result;
+    // Step 4: Check if collection is already paid
+    const collection = await repo.findCollection(referenceNumber);
+    if (collection && collection.status === "Paid") {
+      console.warn(`[WARNING] Collection ${referenceNumber} is already fully paid. Marking paymongo as success.`);
+      await repo.updatePaymongoPayment(referenceNumber, { status: "success", paidAt: new Date() });
+      return {
+        message: "Collection already fully paid",
+        borrowersId: currentPayment.borrowersId,
+        amount: currentPayment.amount,
+        referenceNumber,
+        paymentLogs: [],
+        alreadyProcessed: true,
+        ...collection,
+      };
+    }
+
+    // Step 5: Apply payment to collections/loan
+    console.log("[DEBUG] Applying PayMongo payment of", currentPayment.amount, "to collection", referenceNumber);
+    const result = await applyPayment({
+      referenceNumber,
+      amount: currentPayment.amount,
+      mode: "Paymongo",
+    }, db);
+    
+    console.log("[DEBUG] PayMongo payment applied successfully. Payment logs:", result.paymentLogs?.length || 0);
+
+    // Step 6: Mark as success after payment is successfully applied
+    const now = new Date();
+    await repo.updatePaymongoPayment(referenceNumber, { status: "success", paidAt: now });
+    console.log(`[PAYMENT_SUCCESS] PayMongo payment ${referenceNumber} marked as success`);
+
+    // Step 7: Notify assigned collector if present
+    const borrower = await db.collection("borrowers_account").findOne(
+      { borrowersId: currentPayment.borrowersId },
+      { projection: { assignedCollectorId: 1, name: 1 } }
+    );
+
+    if (borrower?.assignedCollectorId) {
+      const decryptedName = borrower.name ? require("../utils/crypt").decrypt(borrower.name) : "Unknown";
+      const notifRepo = require("../repositories/notificationRepository")(db);
+      await notifRepo.insertCollectorNotification({
+        type: "paymongo-payment-received",
+        title: "PayMongo Payment Received",
+        message: `Payment of ₱${currentPayment.amount.toLocaleString()} via PayMongo for collection ${referenceNumber} has been received from ${decryptedName}.`,
+        referenceNumber,
+        actor: decryptedName,
+        collectorId: borrower.assignedCollectorId,
+        read: false,
+        viewed: false,
+        createdAt: now,
+      });
+    }
+    
+    return result;
+  } catch (err) {
+    // If payment application fails, mark as failed so we can retry
+    console.error("[ERROR] Payment application failed:", err.message);
+    if (DEBUG) console.error("[ERROR] Stack:", err.stack);
+    try {
+      await repo.updatePaymongoPayment(referenceNumber, { 
+        status: "failed", 
+        errorMessage: err.message, 
+        updatedAt: new Date() 
+      });
+    } catch (updateErr) {
+      console.error("[ERROR] Failed to update payment status to failed:", updateErr.message);
+    }
+    throw err;
+  }
 };
 
 // Create PayMongo GCash intent
