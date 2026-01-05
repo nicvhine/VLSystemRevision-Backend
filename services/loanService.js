@@ -2,7 +2,7 @@ const { padId } = require("../utils/generator");
 const loanRepository = require("../repositories/loanRepository");
 const { scheduleDueNotifications } = require("../services/borrowerNotif");
 
-const createLoan = async (applicationId, db) => {
+const createLoan = async (applicationId, db, assignedCollectorId, assignedCollectorName) => {
   const repo = loanRepository(db);
 
   const application = await repo.findApplicationById(applicationId);
@@ -186,6 +186,8 @@ const createLoan = async (applicationId, db) => {
     dateDisbursed: application.dateDisbursed || new Date(),
     creditScore: 10,
     appInterestRate: Number(application.appInterestRate) || 0,
+    assignedCollector: assignedCollectorName || "",
+    assignedCollectorId: assignedCollectorId || "",
     createdAt: new Date(),
   };
 
@@ -240,8 +242,8 @@ const createLoan = async (applicationId, db) => {
       loanBalance: runningBalance,
       runningBalance: runningBalance,
       status: collectionStatus,
-      collector: borrower.assignedCollector || "",
-      collectorId: borrower.assignedCollectorId,
+      collector: assignedCollectorName || borrower.assignedCollector || "",
+      collectorId: assignedCollectorId || borrower.assignedCollectorId || "",
       note: isReloan && i === 0 ? `[Restructured] Payment(s) of ₱${collectionPaidAmount} applied from previous loan` : "",
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -258,7 +260,7 @@ const createLoan = async (applicationId, db) => {
   return loan;
 };
 
-const createOpenTermLoan = async (applicationId, db) => {
+const createOpenTermLoan = async (applicationId, db, assignedCollectorId, assignedCollectorName) => {
   const repo = loanRepository(db);
 
   const application = await repo.findApplicationById(applicationId);
@@ -316,6 +318,8 @@ const createOpenTermLoan = async (applicationId, db) => {
     dateDisbursed: application.dateDisbursed || new Date(),
     creditScore: 10,
     appInterestRate: Number(application.appInterestRate) || 0,
+    assignedCollector: assignedCollectorName || "",
+    assignedCollectorId: assignedCollectorId || "",
     createdAt: new Date(),
   };
 
@@ -343,8 +347,8 @@ const createOpenTermLoan = async (applicationId, db) => {
     paidAmount: 0,
     periodBalance: interestAmount,
     status: "Unpaid",
-    collector: borrower.assignedCollector || "",
-    collectorId: borrower.assignedCollectorId,
+    collector: assignedCollectorName || borrower.assignedCollector || "",
+    collectorId: assignedCollectorId || borrower.assignedCollectorId || "",
     note: "",
     createdAt: new Date(),
     updatedAt: new Date(),

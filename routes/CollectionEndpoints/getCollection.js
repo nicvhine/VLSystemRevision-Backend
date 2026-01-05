@@ -127,5 +127,51 @@ module.exports = (db) => {
     }
   );
 
+  // Get assigned loans for a collector
+  router.get(
+    '/collector/assigned-loans',
+    authenticateToken,
+    authorizeRole('collector'),
+    async (req, res) => {
+      try {
+        const { userId } = req.user;
+
+        const loansCollection = db.collection('loans');
+        const loans = await loansCollection
+          .find({ assignedCollectorId: userId })
+          .toArray();
+
+        // Enrich loans with their collections
+        const loansWithCollections = await Promise.all(
+          loans.map(async (loan) => {
+            const loanCollections = await collections
+              .find({ loanId: loan.loanId })
+              .sort({ collectionNumber: -1 })
+              .toArray();
+
+            const borrower = await db
+              .collection('borrowers_account')
+              .findOne({ borrowersId: loan.borrowersId });
+
+            return {
+              ...loan,
+              borrowerName: borrower?.name ? decrypt(borrower.name) : 'Unknown',
+              collections: loanCollections,
+              totalCollections: loanCollections.length,
+              unpaidCollections: loanCollections.filter(
+                (c) => c.status === 'Unpaid' || c.status === 'Partial'
+              ).length,
+            };
+          })
+        );
+
+        res.json(loansWithCollections);
+      } catch (err) {
+        console.error('Error fetching assigned loans:', err);
+        res.status(500).json({ error: 'Internal server error' });
+      }
+    }
+  );
+
   return router;
 };

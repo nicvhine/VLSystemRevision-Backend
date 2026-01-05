@@ -14,13 +14,27 @@ module.exports = (db) => {
     authorizeRole("collector"),
     async (req, res) => {
       try {
-        const { name } = req.user; 
+        const { name, userId } = req.user; 
         const { referenceNumber } = req.params;
   
         // Fetch the collection
         const collection = await db.collection("collections").findOne({ referenceNumber });
         if (!collection) return res.status(404).json({ error: "Collection not found" });
-        if (collection.collector !== name) {
+        
+        // Debug logging
+        console.log(`[PAYMENT_AUTH] Attempting payment for ${referenceNumber}`);
+        console.log(`[PAYMENT_AUTH] User: name="${name}", userId="${userId}"`);
+        console.log(`[PAYMENT_AUTH] Collection: collector="${collection.collector}", collectorId="${collection.collectorId}"`);
+        
+        // Check if collector is authorized by name OR by userId (collectorId)
+        // Allow if either collector name matches OR collectorId matches
+        const isAuthorizedByName = collection.collector === name;
+        const isAuthorizedById = collection.collectorId && collection.collectorId === userId;
+        
+        console.log(`[PAYMENT_AUTH] Authorized by name: ${isAuthorizedByName}, Authorized by ID: ${isAuthorizedById}`);
+        
+        if (!isAuthorizedByName && !isAuthorizedById) {
+          console.log(`[PAYMENT_AUTH] Authorization failed - denying payment`);
           return res.status(403).json({ error: "You can only process payments for your assigned collections." });
         }
   

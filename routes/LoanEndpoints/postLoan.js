@@ -8,6 +8,7 @@ const loanRepository = require("../../repositories/loanRepository");
 module.exports = (db) => {
   router.post("/generate-loan/:applicationId", authenticateToken, authorizeRole("loan officer"), async (req, res) => {
     const { applicationId } = req.params;
+    const { assignedCollectorId, assignedCollectorName } = req.body;
     const repo = loanRepository(db);
 
     try {
@@ -17,9 +18,9 @@ module.exports = (db) => {
 
       let loan;
       if (application.loanType === "Open-Term Loan") {
-        loan = await createOpenTermLoan(applicationId, db);
+        loan = await createOpenTermLoan(applicationId, db, assignedCollectorId, assignedCollectorName);
       } else {
-        loan = await createLoan(applicationId, db); 
+        loan = await createLoan(applicationId, db, assignedCollectorId, assignedCollectorName); 
       }
 
       res.status(201).json({ message: "Loan and collections created successfully", loan });

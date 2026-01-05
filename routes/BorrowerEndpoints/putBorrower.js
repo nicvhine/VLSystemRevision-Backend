@@ -106,6 +106,18 @@ module.exports = (db) => {
         }
       );
 
+      // Also update loans collection
+      const loans = db.collection("loans");
+      const loansUpdated = await loans.updateMany(
+        { borrowersId: id },
+        {
+          $set: {
+            assignedCollector: assignedCollectorName,
+            assignedCollectorId: assignedCollector,
+          },
+        }
+      );
+
       // Notify the new collector
       try {
         const notificationRepository = require("../../repositories/notificationRepository");
@@ -116,7 +128,7 @@ module.exports = (db) => {
         await notifRepo.insertCollectorNotification({
           type: "collector-assigned",
           title: "New Account Assignment",
-          message: `You have been assigned as the collection officer for borrower ${borrowerName} (Account ID: ${id}). Total of ${collectionsUpdated.modifiedCount} collection record(s) have been transferred to your portfolio.`,
+          message: `You have been assigned as the collection officer for borrower ${borrowerName} (Account ID: ${id}). Total of ${collectionsUpdated.modifiedCount} collection record(s) and ${loansUpdated.modifiedCount} loan(s) have been transferred to your portfolio.`,
           borrowersId: id,
           actor: "Manager",
           read: false,
