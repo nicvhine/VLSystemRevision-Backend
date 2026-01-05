@@ -34,11 +34,11 @@ module.exports = (db) => {
   });
 
   // Change password (only by logged-in borrower)
-  router.put('/:id/change-password', authenticateToken, async (req, res) => {
-    const { id } = req.params;
+  router.put('/:borrowersId/change-password', authenticateToken, async (req, res) => {
+    const { borrowersId } = req.params;
     const { newPassword, currentPassword } = req.body;
 
-    if (req.user.borrowersId !== id) {
+    if (req.user.borrowersId !== borrowersId) {
       return res.status(403).json({ message: 'Unauthorized: You can only change your own password.' });
     }
 
@@ -50,7 +50,7 @@ module.exports = (db) => {
     }
 
     try {
-      const user = await borrowers.findOne({ borrowersId: id });
+      const user = await borrowers.findOne({ borrowersId: borrowersId });
       if (!user) return res.status(404).json({ message: 'Borrower not found' });
 
       const match = await bcrypt.compare(currentPassword, user.password);
@@ -58,7 +58,7 @@ module.exports = (db) => {
 
       const hashedPassword = await bcrypt.hash(newPassword, 10);
       await borrowers.updateOne(
-        { borrowersId: id },
+        { borrowersId: borrowersId },
         { $set: { password: hashedPassword, isFirstLogin: false} }
       );
 
@@ -199,13 +199,13 @@ module.exports = (db) => {
         return res.status(409).json({ error: 'Email already in use.' });
       }
 
-      await borrowers.updateOne({ borrowersId }, { $set: { email: encrypt(normalizedEmail) } });
+      const result = await borrowers.updateOne({ borrowersId }, { $set: { email: encrypt(normalizedEmail) } });
+      console.log('Email update result:', result);
 
-    
       res.status(200).json({ message: 'Email updated successfully' });
     } catch (err) {
       console.error('Failed to update email:', err);
-      res.status(500).json({ error: 'Server error' });
+      res.status(500).json({ error: 'Server error', details: err.message });
     }
   });
 
@@ -214,7 +214,7 @@ module.exports = (db) => {
     const { phoneNumber } = req.body;
     const { borrowersId: jwtBorrowersId } = req.user;
 
-    if (jwtBorrowersId!== borrowersId) return res.status(403).json({ error: 'Unauthorized: can only update your own phone number' });
+    if (jwtBorrowersId !== borrowersId) return res.status(403).json({ error: 'Unauthorized: can only update your own phone number' });
 
     if (!phoneNumber) return res.status(400).json({ error: 'Phone number is required' });
 
@@ -224,12 +224,13 @@ module.exports = (db) => {
         return res.status(409).json({ error: 'Phone number already in use.' });
       }
 
-      await borrowers.updateOne({ borrowersId }, { $set: { phoneNumber: encrypt(phoneNumber) } });
+      const result = await borrowers.updateOne({ borrowersId }, { $set: { phoneNumber: encrypt(phoneNumber) } });
+      console.log('Phone number update result:', result);
 
       res.status(200).json({ message: 'Phone number updated successfully' });
     } catch (err) {
       console.error('Failed to update phone number:', err);
-      res.status(500).json({ error: 'Server error' });
+      res.status(500).json({ error: 'Server error', details: err.message });
     }
   });
 
