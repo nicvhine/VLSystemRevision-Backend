@@ -40,7 +40,7 @@ function loadRoutes(app, db) {
     const { startCollectorNotificationCron } = require("./routes/CollectionEndpoints/collectorNotificationCron");
     startCollectorNotificationCron(db);
 
-    const { creditScoreAdjustmentCron } = require("./Crons/ProductionCrons/creditScoreAdjustment");
+    const creditScoreAdjustmentCron = require("./Crons/ProductionCrons/creditScoreAdjustment");
     creditScoreAdjustmentCron(db);
     
     app.use('/users', userRoutes);
