@@ -32,7 +32,7 @@ async function mockApplication(db, applicationId, overrides = {}) {
             name: 'Lileth Dayuno'
         },
         loanType: 'Regular Loan Without Collateral',
-        status: 'Active',
+        status: 'Approved',
         documents: {
             fileName: 'heatmap (5).png',
             filePath: 'uploads/documents/heatmap (5).png', 

@@ -225,6 +225,35 @@ async function createLoanApplication(req, loanType, repo, db, uploadedFiles, bor
     newApplication.appMonthlyDue = appMonthlyDue;
   }
 
+  // --- Auto-detect if this is a reloan based on existing active loan ---
+  console.log(`[RELOAN_CHECK_START] applicationId=${applicationId}, borrowersId=${borrowersId}, borrowersId type=${typeof borrowersId}`);
+  
+  if (borrowersId) {
+    console.log(`[RELOAN_CHECK_QUERY] Querying for active loans with borrowersId=${borrowersId}`);
+    const existingActiveLoan = await db.collection("loans").findOne({
+      borrowersId,
+      status: "Active"
+    });
+    
+    console.log(`[RELOAN_CHECK_RESULT] Found active loan: ${existingActiveLoan ? existingActiveLoan.loanId : 'NONE'}`);
+    
+    if (existingActiveLoan) {
+      // This borrower already has an active loan - flag this as a reloan
+      newApplication.isReloan = true;
+      newApplication.applicationType = "Reloan";
+      console.log(`[RELOAN_AUTO_DETECT] Application ${applicationId} for borrower ${borrowersId} flagged as reloan (existing loan: ${existingActiveLoan.loanId})`);
+    } else {
+      // First time loan
+      newApplication.isReloan = false;
+      newApplication.applicationType = "Regular";
+      console.log(`[RELOAN_NOT_DETECTED] Application ${applicationId} for borrower ${borrowersId} is REGULAR (no active loans found)`);
+    }
+  } else {
+    newApplication.isReloan = false;
+    newApplication.applicationType = "Regular";
+    console.log(`[RELOAN_NO_BORROWER_ID] No borrowersId provided - flagging as Regular application`);
+  }
+
   // --- Persist application ---
   await repo.insertLoanApplication(newApplication);
 

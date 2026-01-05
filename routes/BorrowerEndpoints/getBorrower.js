@@ -141,11 +141,21 @@ module.exports = (db) => {
           .toArray();
   
         const totalBorrowedAmount = totalLoans[0]?.totalBorrowedAmount || 0;
+
+        // Fetch ALL applications for this borrower (to check for pending ones)
+        const allApplicationsArr = await db
+          .collection("loan_applications")
+          .find({ borrowersId })
+          .sort({ dateApplied: -1 })
+          .toArray();
+        
+        const allApplications = allApplicationsArr.map(app => decryptApplication(app));
   
         res.json({
           borrowerDetails,
           latestApplication,
           totalBorrowedAmount,
+          allApplications,
         });
       } catch (error) {
         console.error("Error fetching borrower:", error);

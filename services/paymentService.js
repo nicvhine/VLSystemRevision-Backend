@@ -132,9 +132,37 @@ const applyPayment = async ({ referenceNumber, amount, collectorName, mode }, db
   }
 
   // Check if payment already fully applied to prevent double-charging
+  // BUT: Allow payments if the collection was paid and now user wants to pay towards next installment
   if (collection.status === "Paid") {
-    console.warn(`[WARNING] Collection ${referenceNumber} is already fully paid. Preventing duplicate payment.`);
-    throw new Error("This collection has already been fully paid");
+    console.log(`[PAID_COLLECTION] Collection ${referenceNumber} is marked as Paid. Attempting to cascade payment to next collection.`);
+    
+    // Get all collections for this loan
+    const allCollections = await repo.findLoanCollections(collection.loanId);
+    const currentIndex = allCollections.findIndex(c => c.referenceNumber === referenceNumber);
+    
+    if (currentIndex >= 0 && currentIndex + 1 < allCollections.length) {
+      // There's a next collection, redirect payment there
+      const nextCollection = allCollections[currentIndex + 1];
+      console.log(`[PAID_REDIRECT] Redirecting payment to next collection: ${nextCollection.referenceNumber}`);
+      
+      // Log the redirection
+      const redirectLog = {
+        originalCollection: referenceNumber,
+        redirectedToCollection: nextCollection.referenceNumber,
+        reason: "Original collection already fully paid, cascading to next",
+        amount,
+        mode,
+        datePaid: now,
+        createdAt: now,
+      };
+      
+      // Recursively apply to the next collection instead
+      return await applyPayment({ referenceNumber: nextCollection.referenceNumber, amount, collectorName, mode }, db);
+    } else {
+      // No next collection exists - this is an overpayment
+      console.warn(`[OVERPAYMENT] Collection ${referenceNumber} is fully paid and is the last collection. Cannot apply overpayment.`);
+      throw new Error("This collection has already been fully paid and there are no additional collections to apply this payment to");
+    }
   }
 
   // Check for duplicate payment records - if this collection was just paid by looking at recent payment logs
@@ -376,17 +404,40 @@ const handlePaymongoSuccess = async (referenceNumber, db) => {
 
     // Step 2: Check if already processed or being processed
     if (currentPayment.status === "success") {
-      console.warn(`[WARNING] PayMongo payment ${referenceNumber} already marked as success. Preventing duplicate.`);
+      console.warn(`[WARNING] PayMongo payment ${referenceNumber} already marked as success. Checking if payment was applied...`);
+      
+      // Check if payment was actually applied to the collection
       const collection = await repo.findCollection(referenceNumber);
-      return {
-        message: "Payment already processed",
-        borrowersId: currentPayment.borrowersId,
-        amount: currentPayment.amount,
-        referenceNumber,
-        paymentLogs: [],
-        alreadyProcessed: true,
-        ...collection,
-      };
+      const recentPaymentLogs = await db.collection("payment-logs").find({
+        referenceNumber: { $regex: `^${referenceNumber}` }
+      }).sort({ createdAt: -1 }).limit(1).toArray();
+      
+      if (recentPaymentLogs.length > 0) {
+        console.log(`[ALREADY_APPLIED] Payment already applied to collection ${referenceNumber}. Skipping duplicate.`);
+        return {
+          message: "Payment already processed",
+          borrowersId: currentPayment.borrowersId,
+          amount: currentPayment.amount,
+          referenceNumber,
+          paymentLogs: recentPaymentLogs,
+          alreadyProcessed: true,
+          ...collection,
+        };
+      } else {
+        // Payment marked as success but NOT applied - apply it now
+        console.log(`[RETRY_APPLY] Payment marked as success but not applied. Applying now for ${referenceNumber}`);
+        const result = await applyPayment({
+          referenceNumber,
+          amount: currentPayment.amount,
+          mode: "Paymongo",
+        }, db);
+        
+        return {
+          ...result,
+          alreadyProcessed: true,
+          wasRetried: true
+        };
+      }
     }
 
     if (currentPayment.status === "processing") {

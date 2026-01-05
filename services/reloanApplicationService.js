@@ -155,6 +155,7 @@ async function createReloanApplication(req, loanType, repo, db, uploadedFiles) {
     loanType: loanType === "without" ? "Regular Loan Without Collateral" : "Regular Loan With Collateral",
     status: "Applied",
     isReloan: true,
+    applicationType: "Reloan",
     previousBalance: prevBalanceNum,
     balanceDecision,
     dateApplied: new Date(),

@@ -7,8 +7,18 @@ const createLoan = async (applicationId, db) => {
 
   const application = await repo.findApplicationById(applicationId);
   if (!application) throw new Error("Application not found");
-  if (application.status !== "Active")
-    throw new Error("Loan can only be generated for applications with status 'Active'");
+
+
+  // Debug: Log the full application object to see what fields exist
+  console.log(`[CREATELOAN_DEBUG] Full application fields:`, {
+    applicationId: application.applicationId,
+    isReloan: application.isReloan,
+    applicationType: application.applicationType,
+    loanType: application.loanType,
+    status: application.status,
+    borrowersId: application.borrowersId,
+    keys: Object.keys(application)
+  });
 
   const existingLoan = await repo.findExistingLoan(applicationId);
   if (existingLoan)
@@ -22,7 +32,13 @@ const createLoan = async (applicationId, db) => {
     throw new Error("Borrower not found for the given borrowersId.");
 
   // Check if this is a reloan application
-  const isReloan = application.loanType?.includes("Reloan") || application.applicationType === "Reloan";
+  // Check multiple indicators: loanType containing "Reloan", applicationType === "Reloan", or isReloan boolean flag
+  const isReloan = application.loanType?.includes("Reloan") || 
+                   application.applicationType === "Reloan" || 
+                   application.isReloan === true;
+  
+  console.log(`[RELOAN_DETECTION] applicationId=${application.applicationId}, loanType=${application.loanType}, applicationType=${application.applicationType}, isReloan=${application.isReloan}, detected=${isReloan}`);
+  
   let oldLoanId = null;
 
   if (isReloan) {
@@ -33,8 +49,11 @@ const createLoan = async (applicationId, db) => {
       .limit(1)
       .toArray();
 
+    console.log(`[RELOAN_OLD_LOAN_SEARCH] borrowersId=${borrower.borrowersId}, found ${activeLoans.length} active loans`);
+
     if (activeLoans.length > 0) {
       oldLoanId = activeLoans[0].loanId;
+      console.log(`[RELOAN_OLD_LOAN_FOUND] oldLoanId=${oldLoanId}`);
 
       // Mark the old loan as "Restructured"
       await repo.updateLoanStatus(oldLoanId, "Restructured");
@@ -58,6 +77,8 @@ const createLoan = async (applicationId, db) => {
         { applicationId: oldLoanId },
         { $set: { status: "Restructured" } }
       );
+    } else {
+      console.log(`[RELOAN_NO_ACTIVE_LOAN] No active loan found for borrowersId=${borrower.borrowersId}`);
     }
   } else {
     // Not a reloan: close any previously active loans
@@ -87,13 +108,72 @@ const createLoan = async (applicationId, db) => {
 
   const loanId = "L" + padId(nextId);
 
+  // Calculate actual balance for the new loan by accounting for payments made during restructuring
+  let newLoanBalance = Number(application.appTotalPayable);
+  let paidAmountFromOldLoan = 0;
+
+  if (isReloan && oldLoanId) {
+    // Get all paid amounts from the old loan's transferred collections
+    const oldCollections = await repo.findLoanCollections(oldLoanId);
+    const oldLoanData = await repo.findLoan(oldLoanId);
+    
+    console.log(`[RELOAN_DEBUG] Found ${oldCollections.length} collections for old loan ${oldLoanId}`);
+    console.log(`[RELOAN_DEBUG] Old loan data: paidAmount=${oldLoanData.paidAmount}, balance=${oldLoanData.balance}`);
+    console.log(`[RELOAN_DEBUG] Application createdAt: ${application.createdAt}`);
+    
+    // Get all payments made to this old loan to find which ones were made during restructuring
+    const allPaymentsForOldLoan = await db.collection("payments")
+      .find({ loanId: oldLoanId })
+      .toArray();
+    
+    console.log(`[RELOAN_DEBUG] Found ${allPaymentsForOldLoan.length} total payments for old loan`);
+    
+    // Only include payments made AFTER the restructuring application was SUBMITTED by user (dateApplied)
+    // NOT after createdAt (server-side timestamp), which may be different
+    const appSubmittedTime = new Date(application.dateApplied || application.createdAt).getTime();
+    
+    const paymentsAfterRestructuring = allPaymentsForOldLoan.filter(p => {
+      if (!p.datePaid) {
+        console.log(`[RELOAN_FILTER] Skipping payment with no datePaid: ${JSON.stringify(p)}`);
+        return false;
+      }
+      
+      const paidTime = new Date(p.datePaid).getTime();
+      const isAfter = paidTime > appSubmittedTime;
+      
+      console.log(`[RELOAN_FILTER] Payment amount=₱${p.amount}, datePaid=${p.datePaid} (${paidTime}), vs appDateApplied=${application.dateApplied} (${appSubmittedTime}), AFTER=${isAfter ? 'YES' : 'NO'}`);
+      
+      return isAfter;
+    });
+    
+    console.log(`[RELOAN_DEBUG] Filtered ${paymentsAfterRestructuring.length} payments made after restructuring application from ${allPaymentsForOldLoan.length} total`);
+    
+    for (const payment of paymentsAfterRestructuring) {
+      const paymentAmount = Number(payment.amount || 0);
+      if (paymentAmount > 0) {
+        paidAmountFromOldLoan += paymentAmount;
+        console.log(`[RELOAN_DEBUG] Including payment of ₱${paymentAmount} made at ${payment.datePaid}`);
+      }
+    }
+    
+    console.log(`[RELOAN_DEBUG] Total paidAmountFromOldLoan calculated: ₱${paidAmountFromOldLoan}`);
+    
+    // Deduct payments made to old loan from new loan's balance
+    if (paidAmountFromOldLoan > 0) {
+      newLoanBalance = Math.max(0, newLoanBalance - paidAmountFromOldLoan);
+      console.log(`[RELOAN_BALANCE_ADJUSTMENT] Old loan total payments (during restructuring): ₱${paidAmountFromOldLoan}, New loan balance adjusted from ₱${Number(application.appTotalPayable)} to ₱${newLoanBalance}`);
+    } else {
+      console.log(`[RELOAN_BALANCE_ADJUSTMENT] No payments found in old loan made after restructuring application`);
+    }
+  }
+
   const loan = {
     loanId,
     applicationId,
     borrowersId: borrower.borrowersId,
     profilePic: application.profilePic || "",
-    paidAmount: 0,
-    balance: Number(application.appTotalPayable),
+    paidAmount: paidAmountFromOldLoan,
+    balance: newLoanBalance,
     status: "Active",
     loanType: application.loanType,
     restructuredFromLoanId: oldLoanId || undefined,
@@ -104,6 +184,9 @@ const createLoan = async (applicationId, db) => {
     appInterestRate: Number(application.appInterestRate) || 0,
     createdAt: new Date(),
   };
+
+  console.log(`[LOAN_CREATION] New loan created: loanId=${loanId}, paidAmount=${paidAmountFromOldLoan}, balance=${newLoanBalance}, restructuredFromLoanId=${oldLoanId}`);
+  console.log(`[LOAN_CREATION_DETAILS]`, JSON.stringify(loan, null, 2));
 
   await repo.insertLoan(loan);
 
@@ -126,6 +209,18 @@ const createLoan = async (applicationId, db) => {
     const dueDate = new Date(disbursedDate);
     dueDate.setMonth(dueDate.getMonth() + (i + 1));
 
+    // For the first collection, if there were payments from old loan during restructuring,
+    // mark it as partially paid
+    let collectionStatus = "Unpaid";
+    let collectionPaidAmount = 0;
+    let collectionPeriodBalance = monthlyDue;
+
+    if (i === 0 && paidAmountFromOldLoan > 0) {
+      collectionStatus = paidAmountFromOldLoan >= monthlyDue ? "Paid" : "Partial";
+      collectionPaidAmount = Math.min(paidAmountFromOldLoan, monthlyDue);
+      collectionPeriodBalance = Math.max(0, monthlyDue - collectionPaidAmount);
+    }
+
     collections.push({
       referenceNumber: `${loanId}-C${i + 1}`,
       loanId,
@@ -136,14 +231,14 @@ const createLoan = async (applicationId, db) => {
       periodAmount: monthlyDue,
       periodInterestAmount: interestAmount,
       periodInterestRate: interestRate,
-      paidAmount: 0,
-      periodBalance: monthlyDue,
+      paidAmount: collectionPaidAmount,
+      periodBalance: collectionPeriodBalance,
       loanBalance: runningBalance,
       runningBalance: runningBalance,
-      status: "Unpaid",
+      status: collectionStatus,
       collector: borrower.assignedCollector || "",
       collectorId: borrower.assignedCollectorId,
-      note: "",
+      note: isReloan && i === 0 ? `[Restructured] Payment(s) of ₱${collectionPaidAmount} applied from previous loan` : "",
       createdAt: new Date(),
       updatedAt: new Date(),
     });

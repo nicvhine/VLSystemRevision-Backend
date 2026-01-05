@@ -156,7 +156,7 @@
 
                 if (phone) {
                   const formattedPhone = formatPhoneNumber(phone);
-                  const message = `Hello ${name}, your loan application ${applicationId} has been denied due to: ${denialReason}. You may reapply online, or contact our office for more details.`;
+                  const message = `${denialReason}`;
 
                   await sendSMS(formattedPhone, message, "Gethsemane");
                   console.log(`Loan denial SMS sent to ${formattedPhone}`);
