@@ -31,23 +31,29 @@ const adjustCreditScores = async (db) => {
     let creditDelta = 0;
 
     for (const collection of collections) {
-      // Skip if already paid
-      if (collection.status === "Paid") continue;
-
       const dueDate = new Date(collection.dueDate);
       const daysLate = Math.floor((currentDate - dueDate) / (1000 * 60 * 60 * 24));
 
-      // Only adjust for unpaid or partial collections
-      if (collection.status === "Unpaid" || collection.status === "Partial") {
-        if (daysLate > 0 && daysLate <= 7) {
-          // 1-7 days overdue: -0.5
+      // Grace period: 3 days (no penalty)
+      const GRACE_PERIOD = 3;
+      // Past due threshold: up to 30 days
+      const PAST_DUE_THRESHOLD = 30;
+
+      if (collection.status === "Paid") {
+        // On time payment: +0.5 points
+        if (daysLate <= GRACE_PERIOD) {
+          creditDelta += 0.5;
+        }
+      } else if (collection.status === "Unpaid" || collection.status === "Partial") {
+        if (daysLate <= GRACE_PERIOD) {
+          // Within grace period: no penalty
+          continue;
+        } else if (daysLate > GRACE_PERIOD && daysLate <= PAST_DUE_THRESHOLD) {
+          // Past due (4-30 days): -0.5
           creditDelta -= 0.5;
-        } else if (daysLate > 7 && daysLate <= 30) {
-          // 8-30 days overdue: -1
+        } else if (daysLate > PAST_DUE_THRESHOLD) {
+          // Overdue (30+ days): -1.0
           creditDelta -= 1;
-        } else if (daysLate > 30) {
-          // More than 30 days overdue: -2
-          creditDelta -= 2;
         }
       }
     }

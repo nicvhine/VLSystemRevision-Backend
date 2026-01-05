@@ -232,6 +232,62 @@ module.exports = (db) => {
       res.status(500).json({ error: 'Server error' });
     }
   });
+
+  // Check if username exists
+  router.get('/check-username/:username', async (req, res) => {
+    const { username } = req.params;
+
+    if (!username) {
+      return res.status(400).json({ error: 'Username is required' });
+    }
+
+    try {
+      const existingUser = await borrowers.findOne({ username: username.toLowerCase() });
+      res.status(200).json({ exists: !!existingUser });
+    } catch (err) {
+      console.error('Failed to check username:', err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // Update username
+  router.put('/:borrowersId/username', authenticateToken, async (req, res) => {
+    const { borrowersId } = req.params;
+    const { username } = req.body;
+    const { borrowersId: jwtBorrowersId } = req.user;
+
+    if (jwtBorrowersId !== borrowersId) {
+      return res.status(403).json({ message: 'Unauthorized: can only update your own username' });
+    }
+
+    if (!username) {
+      return res.status(400).json({ message: 'Username is required' });
+    }
+
+    // Validate username
+    if (username.length < 3 || username.length > 20) {
+      return res.status(400).json({ message: 'Username must be between 3 and 20 characters.' });
+    }
+
+    if (!/^[a-zA-Z0-9_-]+$/.test(username)) {
+      return res.status(400).json({ message: 'Username can only contain letters, numbers, underscores, and hyphens.' });
+    }
+
+    try {
+      // Check if username already exists (case-insensitive)
+      const existingUser = await borrowers.findOne({ username: username.toLowerCase() });
+      if (existingUser && existingUser.borrowersId !== borrowersId) {
+        return res.status(409).json({ message: 'Username already in use.' });
+      }
+
+      await borrowers.updateOne({ borrowersId }, { $set: { username: username.toLowerCase() } });
+
+      res.status(200).json({ message: 'Username updated successfully' });
+    } catch (err) {
+      console.error('Failed to update username:', err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
   
   return router;
 };

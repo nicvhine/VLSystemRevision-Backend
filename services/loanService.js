@@ -56,6 +56,7 @@ const createLoan = async (applicationId, db) => {
       console.log(`[RELOAN_OLD_LOAN_FOUND] oldLoanId=${oldLoanId}`);
 
       // Mark the old loan as "Restructured"
+      const oldLoan = await repo.findLoan(oldLoanId);
       await repo.updateLoanStatus(oldLoanId, "Restructured");
       await repo.updateLoanRestructure(oldLoanId, {
         restructuredAt: new Date(),
@@ -72,11 +73,14 @@ const createLoan = async (applicationId, db) => {
         }
       }
 
-      // Close the old application
-      await db.collection("loan_applications").updateOne(
-        { applicationId: oldLoanId },
-        { $set: { status: "Restructured" } }
-      );
+      // Mark the old application as "Restructured"
+      if (oldLoan && oldLoan.applicationId) {
+        await db.collection("loan_applications").updateOne(
+          { applicationId: oldLoan.applicationId },
+          { $set: { status: "Restructured" } }
+        );
+        console.log(`[RELOAN_APP_UPDATE] Marked old application ${oldLoan.applicationId} as Restructured`);
+      }
     } else {
       console.log(`[RELOAN_NO_ACTIVE_LOAN] No active loan found for borrowersId=${borrower.borrowersId}`);
     }
