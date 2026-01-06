@@ -6,6 +6,7 @@ const getApplication = require("./getApplication");
 const putApplication = require("./putApplication");
 const uploadDocuments = require("./uploadDocuments");
 const withdrawalRequest = require("./withdrawalRequest");
+const ciChecklist = require("./ciChecklist");
 
 // Mount application endpoints (create, read, update, upload)
 module.exports = (db) => {
@@ -14,5 +15,6 @@ module.exports = (db) => {
   router.use("/", putApplication(db));
   router.use("/", uploadDocuments(db));
   router.use("/", withdrawalRequest(db));
+  router.use("/", ciChecklist(db));
   return router;
 };

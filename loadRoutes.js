@@ -17,6 +17,7 @@ function loadRoutes(app, db) {
     const closureRoutes = require('./routes/ClosureEndpoints')(db);
     const otpRoutes = require('./routes/otpEndpoint')(db);
     const sysadRoutes = require('./routes/sysadDashboard')(db);
+    const uploadRoutes = require('./routes/uploadFile')(db);
 
     // TESTING CRONS
 
@@ -58,6 +59,7 @@ function loadRoutes(app, db) {
     app.use('/closure', closureRoutes);
     app.use('/otp', otpRoutes);
     app.use('/sysad', sysadRoutes);
+    app.use('/', uploadRoutes);
 
     app.get("/ping", (req, res) => { res.json({ message: "pong from root" }); });
 
